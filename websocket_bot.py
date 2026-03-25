@@ -14,7 +14,9 @@ st.set_page_config(page_title="수급 스나이퍼 PRO", layout="wide")
 st.title("⚡ 1:1 수급 비교 & 주포 자동 스나이퍼")
 st.caption("두 창구를 비교함과 동시에, 뒤에서는 10대 메이저 창구를 스캔하여 진짜 주포를 찾아냅니다.")
 
-from config import app_key, app_secret, host_url
+app_key = st.secrets["APP_KEY"]
+app_secret = st.secrets["APP_SECRET"]
+host_url = "https://mockapi.kiwoom.com"  # 클라우드는 무조건 모의투자(mockapi) 주소 사용
 
 @st.cache_data(ttl=3600)
 def get_access_token():
