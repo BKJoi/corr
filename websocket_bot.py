@@ -191,9 +191,13 @@ if st.sidebar.button("🚀 1:1 분석 & 주포 자동 스캔"):
 
         st.divider()
 
-        # --- [2단계] 자동 주포 스나이퍼 (전수 조사) ---
+# --- [2단계] 자동 주포 스나이퍼 (전수 조사) ---
         st.subheader(f"🎯 [{selected_broker_name1}] 대비 역상관 주포 TOP 5 스캔")
         progress_bar = st.progress(0, text="메이저 창구 전수 스캔 중...")
+        
+        # ⭐️ 여기 추가: 기준 창구(키움)의 '거래 없음(0)' 횟수 미리 계산
+        kiwoom_zero_count = ((df1['Buy_1m_brk1'] == 0) & (df1['Sell_1m_brk1'] == 0)).sum()
+
         all_scan_results = []
         elite_items = list(elite_brokers.items())
         
@@ -204,6 +208,12 @@ if st.sidebar.button("🚀 1:1 분석 & 주포 자동 스캔"):
             c_raw = get_historical_broker_data(auth_token, stock_number, c_code, max_pages=80) 
             df_c = process_broker_data(c_raw, lag_seconds, 'cand')
             
+            # ⭐️ 여기 추가: [유령 창구 필터링] 키움보다 '거래 없음'이 2배 넘게 많으면 스킵!
+            cand_zero_count = ((df_c['Buy_1m_cand'] == 0) & (df_c['Sell_1m_cand'] == 0)).sum()
+            if cand_zero_count > (kiwoom_zero_count * 2):
+                continue
+
+            # (아래는 기존 코드)
             df_merged = df1.join(df_c, how='outer').fillna(0)
             df_merged['Net_1m_brk1'] = df_merged['Buy_1m_brk1'] - df_merged['Sell_1m_brk1']
             df_merged['Net_1m_cand'] = df_merged['Buy_1m_cand'] - df_merged['Sell_1m_cand']
