@@ -126,17 +126,20 @@ elite_brokers = {name: code for name, code in broker_dict.items() if any(k in na
 if st.sidebar.button("🚀 1:1 분석 & 주포 자동 스캔"):
     with st.spinner("초고속 데이터 수집 및 주포 분석 중입니다..."):
         
+        # [내부 함수] 데이터 파싱 및 1분 단위 가공 로직
         def process_broker_data(raw_data, lag_sec, suffix):
             if not raw_data:
                 return pd.DataFrame(columns=['Datetime', f'Buy_1m_{suffix}', f'Sell_1m_{suffix}', f'Cum_Net_{suffix}']).set_index('Datetime')
-                
+            
             df_b = pd.DataFrame(raw_data)
             time_col_b = 'tm' if 'tm' in df_b.columns else 'stck_cntg_hour'
             
+            # 시간 보정 및 1분 단위 절삭
             df_b['Datetime_Raw'] = pd.to_datetime(target_date_str + df_b[time_col_b], format='%Y%m%d%H%M%S', errors='coerce')
             df_b['Datetime'] = df_b['Datetime_Raw'] - pd.Timedelta(seconds=lag_sec) 
             df_b['Datetime'] = df_b['Datetime'].dt.floor('min')
             
+            # 매수/매도 판별 (기호 및 텍스트 이중 체크)
             def parse_volume(row):
                 tp_str = str(row.get('tp', ''))
                 qty_str = str(row.get('mont_trde_qty', '0')).replace(',', '')
@@ -147,14 +150,13 @@ if st.sidebar.button("🚀 1:1 분석 & 주포 자동 스캔"):
 
             df_b[['Buy_Vol', 'Sell_Vol']] = df_b.apply(parse_volume, axis=1, result_type='expand')
             
+            # 누적 순매수 수량 추출
             if 'acc_netprps' in df_b.columns:
                 df_b['Net_Raw'] = pd.to_numeric(df_b['acc_netprps'].astype(str).str.replace('+', '', regex=False).str.replace(',', '', regex=False), errors='coerce').fillna(0).astype(int)
             else:
                 df_b['Net_Raw'] = 0
                 
-            df_b_min = df_b.groupby('Datetime').agg({'Buy_Vol': 'sum', 'Sell_Vol': 'sum', 'Net_Raw': 'last'})
-            df_b_min.rename(columns={'Buy_Vol': f'Buy_1m_{suffix}', 'Sell_Vol': f'Sell_1m_{suffix}', 'Net_Raw': f'Cum_Net_{suffix}'}, inplace=True)
-            return df_b_min
+            return df_b.groupby('Datetime').agg({'Buy_Vol': 'sum', 'Sell_Vol': 'sum', 'Net_Raw': 'last'}).rename(columns={'Buy_Vol': f'Buy_1m_{suffix}', 'Sell_Vol': f'Sell_1m_{suffix}', 'Net_Raw': f'Cum_Net_{suffix}'})
 
         # --- [1단계] 사용자가 선택한 1:1 창구 분석 ---
         brk_raw1 = get_historical_broker_data(auth_token, stock_number, target_broker_code1)
@@ -169,8 +171,9 @@ if st.sidebar.button("🚀 1:1 분석 & 주포 자동 스캔"):
         df['Cum_Net_brk1'] = df['Net_1m_brk1'].cumsum()
         df['Cum_Net_brk2'] = df['Net_1m_brk2'].cumsum()
 
-        df_corr_active = df[(df['Net_1m_brk1'] != 0) | (df['Net_1m_brk2'] != 0)]
-        real_corr = df_corr_active['Net_1m_brk1'].corr(df_corr_active['Net_1m_brk2']) if len(df_corr_active) >= 3 else 0.0
+        # 상관계수 계산 (거래가 있는 시점만)
+        df_active = df[(df['Net_1m_brk1'] != 0) | (df['Net_1m_brk2'] != 0)]
+        real_corr = df_active['Net_1m_brk1'].corr(df_active['Net_1m_brk2']) if len(df_active) >= 3 else 0.0
         if pd.isna(real_corr): real_corr = 0.0
 
         # UI 출력
@@ -188,15 +191,12 @@ if st.sidebar.button("🚀 1:1 분석 & 주포 자동 스캔"):
 
         st.divider()
 
-        # --- [2단계] 자동 주포 스나이퍼 (전수 조사 및 랭킹 시스템) ---
+        # --- [2단계] 자동 주포 스나이퍼 (전수 조사) ---
         st.subheader(f"🎯 [{selected_broker_name1}] 대비 역상관 주포 TOP 5 스캔")
-        
         progress_bar = st.progress(0, text="메이저 창구 전수 스캔 중...")
-        
-        # ⭐️ 랭킹을 담을 리스트 생성
         all_scan_results = []
-
         elite_items = list(elite_brokers.items())
+        
         for idx, (c_name, c_code) in enumerate(elite_items):
             progress_bar.progress((idx + 1) / len(elite_items), text=f"스캔 중: {c_name}")
             if c_code == target_broker_code1: continue
@@ -208,81 +208,21 @@ if st.sidebar.button("🚀 1:1 분석 & 주포 자동 스캔"):
             df_merged['Net_1m_brk1'] = df_merged['Buy_1m_brk1'] - df_merged['Sell_1m_brk1']
             df_merged['Net_1m_cand'] = df_merged['Buy_1m_cand'] - df_merged['Sell_1m_cand']
             
-            df_active = df_merged[(df_merged['Net_1m_brk1'] != 0) | (df_merged['Net_1m_cand'] != 0)]
+            df_active_c = df_merged[(df_merged['Net_1m_brk1'] != 0) | (df_merged['Net_1m_cand'] != 0)]
             
-            if len(df_active) >= 3:
-                corr = df_active['Net_1m_brk1'].corr(df_active['Net_1m_cand'])
+            if len(df_active_c) >= 3:
+                corr = df_active_c['Net_1m_brk1'].corr(df_active_c['Net_1m_cand'])
                 if not pd.isna(corr):
-                    # 결과 리스트에 담기 (이름, 상관계수, 데이터프레임)
-                    all_scan_results.append({
-                        'name': c_name,
-                        'corr': corr,
-                        'df': df_merged
-                    })
+                    all_scan_results.append({'name': c_name, 'corr': corr, 'df': df_merged})
 
         progress_bar.empty()
 
-        # ----------------------------------------------------
-        # 3. TOP 5 랭킹 발표 UI
-        # ----------------------------------------------------
-        # 상관계수가 낮은 순(가장 반대인 순)으로 정렬
+        # --- [3단계] TOP 5 랭킹 발표 UI ---
         all_scan_results.sort(key=lambda x: x['corr'])
-        top_5 = all_scan_results[:5] # 상위 5개 추출
+        top_5 = all_scan_results[:5]
 
-        if top_5:
-            st.markdown("#### 🏆 실시간 역상관 주포 랭킹 (기준: " + selected_broker_name1 + ")")
-            
-            # ⭐️ 5칸으로 쪼개서 대시보드 만들기
-            cols = st.columns(5)
-            for rank, (col, res) in enumerate(zip(cols, top_5), 1):
-                with col:
-                    # 상관계수 정도에 따른 색상 결정
-                    box_color = "#0066ff" if res['corr'] <= -0.5 else "#5e96ff" if res['corr'] <= -0.3 else "#abb8c3"
-                    
-                    st.markdown(
-                        f"""
-                        <div style='padding: 10px; border-radius: 8px; border: 2px solid {box_color}; background-color: white; text-align: center; height: 160px;'>
-                            <p style='margin:0; font-size: 14px; font-weight: bold; color: {box_color};'>{rank}위</p>
-                            <p style='margin: 5px 0; font-size: 15px; font-weight: bold; color: #333;'>{res['name']}</p>
-                            <h2 style='margin: 10px 0; color: {box_color};'>{res['corr']:+.2f}</h2>
-                            <p style='margin:0; font-size: 11px; color: gray;'>{'세력 감지' if res['corr'] <= -0.3 else '관망'}</p>
-                        </div>
-                        """, unsafe_allow_html=True
-                    )
-            
-            st.divider()
-
-            # --- [4단계] 1위 주포의 상세 차트만 하단에 출력 ---
-            best_res = top_5[0]
-            st.success(f"🥇 최강 주포 포착: [{best_res['name']}]의 누적 순매수와 [{selected_broker_name1}]은 완벽하게 거꾸로 달리고 있습니다.")
-            
-            best_df = best_res['df']
-            best_df['Cum_Net_cand'] = best_df['Net_1m_cand'].cumsum()
-            best_df['Cum_Net_brk1'] = best_df['Net_1m_brk1'].cumsum()
-
-            fig_best = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.6, 0.4])
-            fig_best.add_trace(go.Scatter(x=best_df.index, y=best_df['Cum_Net_brk1'], mode='lines', name=selected_broker_name1, line=dict(color='#ff4d4d', width=3)), row=1, col=1)
-            fig_best.add_trace(go.Scatter(x=best_df.index, y=best_df['Cum_Net_cand'], mode='lines', name=best_res['name'], line=dict(color='#0066ff', width=3)), row=1, col=1)
-            fig_best.add_trace(go.Bar(x=best_df.index, y=best_df['Net_1m_brk1'], name=selected_broker_name1, marker_color='#ff4d4d', opacity=0.7), row=2, col=1)
-            fig_best.add_trace(go.Bar(x=best_df.index, y=best_df['Net_1m_cand'], name=best_res['name'], marker_color='#0066ff', opacity=0.7), row=2, col=1)
-            fig_best.update_layout(height=500, template='plotly_white', barmode='group', showlegend=False)
-            st.plotly_chart(fig_best, use_container_width=True)
-            
-        else:
-            st.info("오늘 이 종목에서는 뚜렷한 역상관을 보이는 메이저 세력 창구가 발견되지 않았습니다.")
-
-# ----------------------------------------------------
-        # 3. TOP 5 랭킹 발표 및 시각화 (여기로 덮어쓰기!)
-        # ----------------------------------------------------
-        # 상관계수가 낮은 순(가장 반대)으로 정렬
-        all_scan_results.sort(key=lambda x: x['corr'])
-        top_5 = all_scan_results[:5] # 상위 5개만 추출
-
-        # ⭐️ 이제 'best_broker_name' 대신 'top_5'가 있는지 확인합니다.
         if top_5:
             st.markdown(f"#### 🏆 실시간 역상관 주포 랭킹 (기준: {selected_broker_name1})")
-            
-            # 5칸 대시보드 생성
             cols = st.columns(5)
             for rank, (col, res) in enumerate(zip(cols, top_5), 1):
                 with col:
@@ -300,8 +240,7 @@ if st.sidebar.button("🚀 1:1 분석 & 주포 자동 스캔"):
             
             st.divider()
 
-            # --- [4단계] 1등 주포 상세 차트 ---
-            # 리스트의 첫 번째 녀석(0번)이 1등입니다.
+            # --- [4단계] 1위 주포 상세 차트 ---
             best_res = top_5[0]
             if best_res['corr'] <= -0.3:
                 st.success(f"🥇 최강 주포 포착: [{best_res['name']}]의 누적 순매수와 [{selected_broker_name1}]은 완벽하게 거꾸로 달리고 있습니다.")
@@ -320,4 +259,4 @@ if st.sidebar.button("🚀 1:1 분석 & 주포 자동 스캔"):
             else:
                 st.info("오늘 이 종목에서는 뚜렷한 역상관을 보이는 메이저 세력 창구가 발견되지 않았습니다.")
         else:
-            st.info("스캔 결과 유효한 상관관계 데이터가 없습니다.")        
+            st.info("스캔 결과 유효한 상관관계 데이터가 없습니다.")
