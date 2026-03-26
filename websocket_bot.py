@@ -104,7 +104,7 @@ default_idx2 = next((i for i, name in enumerate(broker_names) if name.startswith
 selected_broker_name2 = st.sidebar.selectbox("🔎 비교 창구 (1:1)", broker_names, index=default_idx2)
 target_broker_code2 = broker_dict.get(selected_broker_name2, "")
 
-lag_seconds = st.sidebar.slider("⏱️ 창구 시간 보정 (초)", 0, 180, 130)
+lag_seconds = st.sidebar.slider("⏱️ 창구 시간 보정 (초)", 0, 180, 60)
 
 # --- ⭐️ 원격 작업용 긴급 해결 버튼 추가 ---
 st.sidebar.markdown("---")
