@@ -126,147 +126,187 @@ elite_brokers = {name: code for name, code in broker_dict.items() if any(k in na
 if st.sidebar.button("🚀 1:1 분석 & 주포 자동 스캔"):
     with st.spinner("초고속 데이터 수집 및 주포 분석 중입니다..."):
         
-        # [내부 함수] 데이터 파싱 및 1분 단위 가공 로직
+        # --- [내부 함수] 1. 프로그램 데이터 수집 & 파싱 ---
+        def get_historical_program_data(token, stock_code, target_date, max_pages=800):
+            url = f"{host_url}/api/dostk/mrkcond"
+            all_data, next_key, retry_count = [], "", 0
+            for i in range(max_pages):
+                headers = {"Content-Type": "application/json;charset=UTF-8", "api-id": "ka90008", "authorization": f"Bearer {token}"}
+                if next_key: headers.update({"cont-yn": "Y", "tr-cont": "Y", "next-key": next_key, "tr-cont-key": next_key})
+                response = requests.post(url, headers=headers, json={"amt_qty_tp": "2", "stk_cd": stock_code, "date": target_date})
+                if response.status_code != 200:
+                    time.sleep(1.5); continue
+                chunk = response.json().get('stk_tm_prm_trde_trnsn', [])
+                if not chunk:
+                    retry_count += 1
+                    if retry_count > 2: break
+                    time.sleep(0.3); continue
+                retry_count = 0
+                all_data.extend(chunk)
+                last_time = chunk[-1].get('tm', '')
+                if last_time and last_time <= "090000": break
+                next_key = response.headers.get('next-key', response.headers.get('tr-cont-key', ''))
+                if not next_key: break
+                time.sleep(0.15)
+            return all_data
+
+        def process_pg_data(raw_data):
+            if not raw_data: return pd.DataFrame(columns=['Datetime', 'Net_1m_pg', 'Cum_Net_pg']).set_index('Datetime')
+            df_pg = pd.DataFrame(raw_data)
+            df_pg['Datetime'] = pd.to_datetime(target_date_str + df_pg['tm'], format='%Y%m%d%H%M%S').dt.floor('min')
+            df_pg['Cum_Buy'] = pd.to_numeric(df_pg['prm_buy_qty'].astype(str).str.replace(',', ''), errors='coerce').fillna(0).astype(int)
+            df_pg['Cum_Sell'] = pd.to_numeric(df_pg['prm_sell_qty'].astype(str).str.replace(',', ''), errors='coerce').fillna(0).astype(int)
+            df_pg = df_pg.sort_values('Datetime').groupby('Datetime').agg({'Cum_Buy': 'last', 'Cum_Sell': 'last'})
+            df_pg['Buy_1m'] = df_pg['Cum_Buy'].diff().fillna(df_pg['Cum_Buy']).clip(lower=0)
+            df_pg['Sell_1m'] = df_pg['Cum_Sell'].diff().fillna(df_pg['Cum_Sell']).clip(lower=0)
+            df_pg['Net_1m_pg'] = df_pg['Buy_1m'] - df_pg['Sell_1m']
+            df_pg['Cum_Net_pg'] = df_pg['Cum_Buy'] - df_pg['Cum_Sell']
+            return df_pg[['Net_1m_pg', 'Cum_Net_pg']]
+
+        # --- [내부 함수] 2. 거래원(증권사) 데이터 수집 & 파싱 ---
         def process_broker_data(raw_data, lag_sec, suffix):
-            if not raw_data:
-                return pd.DataFrame(columns=['Datetime', f'Buy_1m_{suffix}', f'Sell_1m_{suffix}', f'Cum_Net_{suffix}']).set_index('Datetime')
-            
+            if not raw_data: return pd.DataFrame(columns=['Datetime', f'Buy_1m_{suffix}', f'Sell_1m_{suffix}', f'Cum_Net_{suffix}']).set_index('Datetime')
             df_b = pd.DataFrame(raw_data)
             time_col_b = 'tm' if 'tm' in df_b.columns else 'stck_cntg_hour'
-            
-            # 시간 보정 및 1분 단위 절삭
-            df_b['Datetime_Raw'] = pd.to_datetime(target_date_str + df_b[time_col_b], format='%Y%m%d%H%M%S', errors='coerce')
-            df_b['Datetime'] = df_b['Datetime_Raw'] - pd.Timedelta(seconds=lag_sec) 
-            df_b['Datetime'] = df_b['Datetime'].dt.floor('min')
-            
-            # 매수/매도 판별 (기호 및 텍스트 이중 체크)
+            df_b['Datetime'] = (pd.to_datetime(target_date_str + df_b[time_col_b], format='%Y%m%d%H%M%S', errors='coerce') - pd.Timedelta(seconds=lag_sec)).dt.floor('min')
             def parse_volume(row):
-                tp_str = str(row.get('tp', ''))
-                qty_str = str(row.get('mont_trde_qty', '0')).replace(',', '')
-                if '-' in qty_str or '매도' in tp_str:
-                    return 0, int(qty_str.replace('-', '').replace('+', '')) if qty_str else 0
-                else:
-                    return int(qty_str.replace('+', '').replace('-', '')) if qty_str else 0, 0
-
+                tp_str, qty_str = str(row.get('tp', '')), str(row.get('mont_trde_qty', '0')).replace(',', '')
+                qty = int(qty_str.replace('-', '').replace('+', '')) if qty_str else 0
+                return (0, qty) if '-' in qty_str or '매도' in tp_str else (qty, 0)
             df_b[['Buy_Vol', 'Sell_Vol']] = df_b.apply(parse_volume, axis=1, result_type='expand')
-            
-            # 누적 순매수 수량 추출
-            if 'acc_netprps' in df_b.columns:
-                df_b['Net_Raw'] = pd.to_numeric(df_b['acc_netprps'].astype(str).str.replace('+', '', regex=False).str.replace(',', '', regex=False), errors='coerce').fillna(0).astype(int)
-            else:
-                df_b['Net_Raw'] = 0
-                
+            df_b['Net_Raw'] = pd.to_numeric(df_b['acc_netprps'].astype(str).str.replace('+', '', regex=False).str.replace(',', '', regex=False), errors='coerce').fillna(0).astype(int) if 'acc_netprps' in df_b.columns else 0
             return df_b.groupby('Datetime').agg({'Buy_Vol': 'sum', 'Sell_Vol': 'sum', 'Net_Raw': 'last'}).rename(columns={'Buy_Vol': f'Buy_1m_{suffix}', 'Sell_Vol': f'Sell_1m_{suffix}', 'Net_Raw': f'Cum_Net_{suffix}'})
 
-        # --- [1단계] 사용자가 선택한 1:1 창구 분석 ---
+        # --- [데이터 병합 준비] PG & 사용자기준(키움 등) 기초 데이터 세팅 ---
+        pg_raw = get_historical_program_data(auth_token, stock_number, target_date_str)
+        df_pg = process_pg_data(pg_raw)
+        
         brk_raw1 = get_historical_broker_data(auth_token, stock_number, target_broker_code1)
-        brk_raw2 = get_historical_broker_data(auth_token, stock_number, target_broker_code2)
-        
         df1 = process_broker_data(brk_raw1, lag_seconds, 'brk1')
-        df2 = process_broker_data(brk_raw2, lag_seconds, 'brk2')
-        
-        df = df1.join(df2, how='outer').fillna(0)
-        df['Net_1m_brk1'] = df['Buy_1m_brk1'] - df['Sell_1m_brk1']
-        df['Net_1m_brk2'] = df['Buy_1m_brk2'] - df['Sell_1m_brk2']
-        df['Cum_Net_brk1'] = df['Net_1m_brk1'].cumsum()
-        df['Cum_Net_brk2'] = df['Net_1m_brk2'].cumsum()
+        df1['Net_1m_brk1'] = df1['Buy_1m_brk1'] - df1['Sell_1m_brk1']
 
-        # 상관계수 계산 (거래가 있는 시점만)
-        df_active = df[(df['Net_1m_brk1'] != 0) | (df['Net_1m_brk2'] != 0)]
-        real_corr = df_active['Net_1m_brk1'].corr(df_active['Net_1m_brk2']) if len(df_active) >= 3 else 0.0
-        if pd.isna(real_corr): real_corr = 0.0
-
-        # UI 출력
-        st.subheader("📊 사용자가 선택한 1:1 창구 비교")
-        c_color = "#0066ff" if real_corr <= -0.5 else "#ff4d4d" if real_corr >= 0.5 else "gray"
-        st.markdown(f"<h3 style='color: {c_color}; text-align: center;'>상관계수: {real_corr:+.2f}</h3>", unsafe_allow_html=True)
-        
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.6, 0.4], subplot_titles=("📈 누적 순매수 흐름", "⚡ 1분봉 순매수 공방전"))
-        fig.add_trace(go.Scatter(x=df.index, y=df['Cum_Net_brk1'], mode='lines', name=f"{selected_broker_name1}", line=dict(color='#ff4d4d', width=3)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['Cum_Net_brk2'], mode='lines', name=f"{selected_broker_name2}", line=dict(color='#0066ff', width=3)), row=1, col=1)
-        fig.add_trace(go.Bar(x=df.index, y=df['Net_1m_brk1'], name=f"{selected_broker_name1}", marker_color='#ff4d4d', opacity=0.7), row=2, col=1)
-        fig.add_trace(go.Bar(x=df.index, y=df['Net_1m_brk2'], name=f"{selected_broker_name2}", marker_color='#0066ff', opacity=0.7), row=2, col=1)
-        fig.update_layout(height=600, template='plotly_white', barmode='group', showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.divider()
-
-# --- [2단계] 자동 주포 스나이퍼 (전수 조사) ---
-        st.subheader(f"🎯 [{selected_broker_name1}] 대비 역상관 주포 TOP 5 스캔")
-        progress_bar = st.progress(0, text="메이저 창구 전수 스캔 중...")
-        
-        # ⭐️ 여기 추가: 기준 창구(키움)의 '거래 없음(0)' 횟수 미리 계산
+        # ⭐️ 유령 창구 필터: 기준 창구(키움)의 '거래 없는 분(0)' 횟수 측정
         kiwoom_zero_count = ((df1['Buy_1m_brk1'] == 0) & (df1['Sell_1m_brk1'] == 0)).sum()
 
-        all_scan_results = []
-        elite_items = list(elite_brokers.items())
+        # --- [본격 스캔] 10대 창구 전수 조사 ---
+        st.subheader("🎯 엘리트 10대 창구 정밀 스캔 진행 중...")
+        progress_bar = st.progress(0)
         
+        pg_scan_results = []   # 1번: 프로그램 일치(정상관) 랭킹용
+        brk1_scan_results = [] # 2번: 키움 역상관(반대매매) 랭킹용
+        
+        elite_items = list(elite_brokers.items())
         for idx, (c_name, c_code) in enumerate(elite_items):
             progress_bar.progress((idx + 1) / len(elite_items), text=f"스캔 중: {c_name}")
             if c_code == target_broker_code1: continue
                 
             c_raw = get_historical_broker_data(auth_token, stock_number, c_code, max_pages=80) 
             df_c = process_broker_data(c_raw, lag_seconds, 'cand')
+            df_c['Net_1m_cand'] = df_c['Buy_1m_cand'] - df_c['Sell_1m_cand']
             
-            # ⭐️ 여기 추가: [유령 창구 필터링] 키움보다 '거래 없음'이 2배 넘게 많으면 스킵!
+            # ⭐️ 유령 창구 필터 적용
             cand_zero_count = ((df_c['Buy_1m_cand'] == 0) & (df_c['Sell_1m_cand'] == 0)).sum()
             if cand_zero_count > (kiwoom_zero_count * 2):
-                continue
-
-            # (아래는 기존 코드)
-            df_merged = df1.join(df_c, how='outer').fillna(0)
-            df_merged['Net_1m_brk1'] = df_merged['Buy_1m_brk1'] - df_merged['Sell_1m_brk1']
-            df_merged['Net_1m_cand'] = df_merged['Buy_1m_cand'] - df_merged['Sell_1m_cand']
+                continue # 거래가 너무 없으면 알고리즘/주포에서 탈락!
             
-            df_active_c = df_merged[(df_merged['Net_1m_brk1'] != 0) | (df_merged['Net_1m_cand'] != 0)]
-            
-            if len(df_active_c) >= 3:
-                corr = df_active_c['Net_1m_brk1'].corr(df_active_c['Net_1m_cand'])
-                if not pd.isna(corr):
-                    all_scan_results.append({'name': c_name, 'corr': corr, 'df': df_merged})
+            # 1. PG 상관성 계산 (df_pg 존재 시)
+            if not df_pg.empty:
+                df_pg_c = df_pg.join(df_c, how='outer').fillna(0)
+                active_pg = df_pg_c[(df_pg_c['Net_1m_pg'] != 0) | (df_pg_c['Net_1m_cand'] != 0)]
+                if len(active_pg) >= 3:
+                    corr_pg = active_pg['Net_1m_pg'].corr(active_pg['Net_1m_cand'])
+                    if not pd.isna(corr_pg):
+                        pg_scan_results.append({'name': c_name, 'corr': corr_pg, 'df': df_pg_c})
+                        
+            # 2. 기준창구(키움) 상관성 계산
+            df_b1_c = df1.join(df_c, how='outer').fillna(0)
+            active_b1 = df_b1_c[(df_b1_c['Net_1m_brk1'] != 0) | (df_b1_c['Net_1m_cand'] != 0)]
+            if len(active_b1) >= 3:
+                corr_b1 = active_b1['Net_1m_brk1'].corr(active_b1['Net_1m_cand'])
+                if not pd.isna(corr_b1):
+                    brk1_scan_results.append({'name': c_name, 'corr': corr_b1, 'df': df_b1_c})
 
         progress_bar.empty()
 
-        # --- [3단계] TOP 5 랭킹 발표 UI ---
-        all_scan_results.sort(key=lambda x: x['corr'])
-        top_5 = all_scan_results[:5]
+        # ========================================================================
+        # 👑 [RANK 1] 프로그램(알고리즘) 본체 추적 보드 (정상관 높은 순)
+        # ========================================================================
+        pg_scan_results.sort(key=lambda x: x['corr'], reverse=True) # 일치해야 하므로 내림차순(+)
+        top_5_pg = pg_scan_results[:5]
 
-        if top_5:
-            st.markdown(f"#### 🏆 실시간 역상관 주포 랭킹 (기준: {selected_broker_name1})")
+        st.markdown("---")
+        st.markdown("### 🤖 [TRACK 1] 프로그램(PG) 알고리즘 통로 추적 TOP 5")
+        st.caption("프로그램 매매와 가장 똑같이 움직이는 창구를 찾습니다. (상관계수 +0.5 이상이면 알고리즘 본체일 확률 90%)")
+
+        if top_5_pg:
             cols = st.columns(5)
-            for rank, (col, res) in enumerate(zip(cols, top_5), 1):
+            for rank, (col, res) in enumerate(zip(cols, top_5_pg), 1):
                 with col:
+                    # 일치할수록 빨간색(주포 발견)
+                    box_color = "#ff4d4d" if res['corr'] >= 0.5 else "#ff9999" if res['corr'] >= 0.3 else "#abb8c3"
+                    st.markdown(f"""
+                        <div style='padding: 10px; border-radius: 8px; border: 2px solid {box_color}; background-color: white; text-align: center; height: 160px;'>
+                            <p style='margin:0; font-size: 14px; font-weight: bold; color: {box_color};'>{rank}위</p>
+                            <p style='margin: 5px 0; font-size: 15px; font-weight: bold; color: #333;'>{res['name']}</p>
+                            <h2 style='margin: 10px 0; color: {box_color};'>{res['corr']:+.2f}</h2>
+                            <p style='margin:0; font-size: 11px; color: gray;'>{'알고리즘 유력' if res['corr'] >= 0.5 else '관망'}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+            
+            # PG 1위 차트
+            best_pg = top_5_pg[0]
+            if best_pg['corr'] >= 0.3:
+                st.success(f"🎯 알고리즘 포착! 오늘 프로그램 매매의 핵심 통로는 [{best_pg['name']}] 창구로 강하게 의심됩니다.")
+                b_df = best_pg['df']
+                b_df['Cum_Net_cand'] = b_df['Net_1m_cand'].cumsum()
+                fig_pg = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.6, 0.4])
+                fig_pg.add_trace(go.Scatter(x=b_df.index, y=b_df['Cum_Net_pg'], mode='lines', name="프로그램 누적", line=dict(color='black', width=3, dash='dash')), row=1, col=1)
+                fig_pg.add_trace(go.Scatter(x=b_df.index, y=b_df['Cum_Net_cand'], mode='lines', name=best_pg['name'], line=dict(color='#ff4d4d', width=3)), row=1, col=1)
+                fig_pg.add_trace(go.Bar(x=b_df.index, y=b_df['Net_1m_pg'], name="PG 1분", marker_color='gray', opacity=0.5), row=2, col=1)
+                fig_pg.add_trace(go.Bar(x=b_df.index, y=b_df['Net_1m_cand'], name=best_pg['name'], marker_color='#ff4d4d', opacity=0.8), row=2, col=1)
+                fig_pg.update_layout(height=450, template='plotly_white', barmode='group', showlegend=False, title_text=f"프로그램 누적매수 vs {best_pg['name']} 누적매수")
+                st.plotly_chart(fig_pg, use_container_width=True)
+        else:
+            st.info("프로그램 데이터가 없거나 뚜렷한 일치 창구가 없습니다.")
+
+
+        # ========================================================================
+        # 👑 [RANK 2] 기준 창구(키움) 반대매매 추적 보드 (역상관 낮은 순)
+        # ========================================================================
+        brk1_scan_results.sort(key=lambda x: x['corr']) # 반대여야 하므로 오름차순(-)
+        top_5_brk = brk1_scan_results[:5]
+
+        st.markdown("---")
+        st.markdown(f"### 🐜 [TRACK 2] {selected_broker_name1} 반대매매(역상관) 추적 TOP 5")
+        st.caption("개미 창구와 정반대로 움직이며 물량을 받아먹거나 던지는 진짜 주포를 찾습니다.")
+
+        if top_5_brk:
+            cols = st.columns(5)
+            for rank, (col, res) in enumerate(zip(cols, top_5_brk), 1):
+                with col:
+                    # 역상관일수록 파란색(반대 세력 발견)
                     box_color = "#0066ff" if res['corr'] <= -0.5 else "#5e96ff" if res['corr'] <= -0.3 else "#abb8c3"
-                    st.markdown(
-                        f"""
+                    st.markdown(f"""
                         <div style='padding: 10px; border-radius: 8px; border: 2px solid {box_color}; background-color: white; text-align: center; height: 160px;'>
                             <p style='margin:0; font-size: 14px; font-weight: bold; color: {box_color};'>{rank}위</p>
                             <p style='margin: 5px 0; font-size: 15px; font-weight: bold; color: #333;'>{res['name']}</p>
                             <h2 style='margin: 10px 0; color: {box_color};'>{res['corr']:+.2f}</h2>
                             <p style='margin:0; font-size: 11px; color: gray;'>{'세력 감지' if res['corr'] <= -0.3 else '관망'}</p>
                         </div>
-                        """, unsafe_allow_html=True
-                    )
+                        """, unsafe_allow_html=True)
             
-            st.divider()
-
-            # --- [4단계] 1위 주포 상세 차트 ---
-            best_res = top_5[0]
-            if best_res['corr'] <= -0.3:
-                st.success(f"🥇 최강 주포 포착: [{best_res['name']}]의 누적 순매수와 [{selected_broker_name1}]은 완벽하게 거꾸로 달리고 있습니다.")
-                
-                best_df = best_res['df']
-                best_df['Cum_Net_cand'] = best_df['Net_1m_cand'].cumsum()
-                best_df['Cum_Net_brk1'] = best_df['Net_1m_brk1'].cumsum()
-
-                fig_best = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.6, 0.4])
-                fig_best.add_trace(go.Scatter(x=best_df.index, y=best_df['Cum_Net_brk1'], mode='lines', name=selected_broker_name1, line=dict(color='#ff4d4d', width=3)), row=1, col=1)
-                fig_best.add_trace(go.Scatter(x=best_df.index, y=best_df['Cum_Net_cand'], mode='lines', name=best_res['name'], line=dict(color='#0066ff', width=3)), row=1, col=1)
-                fig_best.add_trace(go.Bar(x=best_df.index, y=best_df['Net_1m_brk1'], name=selected_broker_name1, marker_color='#ff4d4d', opacity=0.7), row=2, col=1)
-                fig_best.add_trace(go.Bar(x=best_df.index, y=best_df['Net_1m_cand'], name=best_res['name'], marker_color='#0066ff', opacity=0.7), row=2, col=1)
-                fig_best.update_layout(height=500, template='plotly_white', barmode='group', showlegend=False)
-                st.plotly_chart(fig_best, use_container_width=True)
-            else:
-                st.info("오늘 이 종목에서는 뚜렷한 역상관을 보이는 메이저 세력 창구가 발견되지 않았습니다.")
+            # 키움 역상관 1위 차트
+            best_brk = top_5_brk[0]
+            if best_brk['corr'] <= -0.3:
+                st.success(f"🥇 역상관 포착: [{best_brk['name']}]의 누적 순매수와 [{selected_broker_name1}]은 완벽하게 거꾸로 달리고 있습니다.")
+                b_df = best_brk['df']
+                b_df['Cum_Net_cand'], b_df['Cum_Net_brk1'] = b_df['Net_1m_cand'].cumsum(), b_df['Net_1m_brk1'].cumsum()
+                fig_brk = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.6, 0.4])
+                fig_brk.add_trace(go.Scatter(x=b_df.index, y=b_df['Cum_Net_brk1'], mode='lines', name=selected_broker_name1, line=dict(color='#ff4d4d', width=3)), row=1, col=1)
+                fig_brk.add_trace(go.Scatter(x=b_df.index, y=b_df['Cum_Net_cand'], mode='lines', name=best_brk['name'], line=dict(color='#0066ff', width=3)), row=1, col=1)
+                fig_brk.add_trace(go.Bar(x=b_df.index, y=b_df['Net_1m_brk1'], name=selected_broker_name1, marker_color='#ff4d4d', opacity=0.7), row=2, col=1)
+                fig_brk.add_trace(go.Bar(x=b_df.index, y=b_df['Net_1m_cand'], name=best_brk['name'], marker_color='#0066ff', opacity=0.7), row=2, col=1)
+                fig_brk.update_layout(height=450, template='plotly_white', barmode='group', showlegend=False, title_text=f"{selected_broker_name1} 누적매수 vs {best_brk['name']} 누적매수")
+                st.plotly_chart(fig_brk, use_container_width=True)
         else:
-            st.info("스캔 결과 유효한 상관관계 데이터가 없습니다.")
+            st.info("뚜렷한 역상관을 보이는 메이저 세력 창구가 발견되지 않았습니다.")
