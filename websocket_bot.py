@@ -37,33 +37,45 @@ def get_broker_list(token):
             broker_dict[f"{item['name']}({item['code']})"] = item["code"]
     return broker_dict
 
-def get_historical_broker_data(token, stock_code, brk_code, max_pages=100):
+def get_historical_broker_data(token, stock_code, brk_code, max_pages=800): # ⭐️ 800페이지로 상향
     url = f"{host_url}/api/dostk/stkinfo"
     all_data = []
     next_key = ""
+    retry_count = 0 
+    
     for i in range(max_pages): 
         headers = {"Content-Type": "application/json;charset=UTF-8", "api-id": "ka10052", "authorization": f"Bearer {token}"}
         if next_key: headers.update({"cont-yn": "Y", "tr-cont": "Y", "next-key": next_key, "tr-cont-key": next_key})
-        req_data = {"mmcm_cd": brk_code, "stk_cd": stock_code, "mrkt_tp": "0", "qty_tp": "0", "pric_tp": "0", "stex_tp": "1"}
         
+        req_data = {"mmcm_cd": brk_code, "stk_cd": stock_code, "mrkt_tp": "0", "qty_tp": "0", "pric_tp": "0", "stex_tp": "1"}
         response = requests.post(url, headers=headers, json=req_data)
+        
         if response.status_code != 200:
-            time.sleep(3)
+            time.sleep(1.5) # ⭐️ 호출 제한(1700) 발생 시 잠시 휴식
             continue
             
         res_json = response.json()
         chunk = res_json.get('trde_ori_mont_trde_qty', [])
-        if not chunk: break
         
+        if not chunk:
+            retry_count += 1
+            if retry_count > 2: break # 3번 연속 없으면 진짜 끝
+            time.sleep(0.3)
+            continue
+            
+        retry_count = 0
         all_data.extend(chunk)
         
+        # 9시 도달 체크 (데이터가 09:00:00 이하로 내려가면 탈출)
         last_time = chunk[-1].get('tm', chunk[-1].get('stck_cntg_hour', ''))
-        if last_time and last_time <= "090000": break
+        if last_time and last_time <= "090000":
+            break
             
-        cont_yn = response.headers.get('cont-yn', response.headers.get('tr-cont', 'N'))
         next_key = response.headers.get('next-key', response.headers.get('tr-cont-key', ''))
-        if str(cont_yn).upper() not in ['Y', 'M'] or not next_key: break
-        time.sleep(0.3) 
+        if not next_key: break
+        
+        # ⭐️ 스캔 속도 최적화: 0.3초 -> 0.15초 (차단 안 당하는 선에서 가장 빠른 속도)
+        time.sleep(0.15) 
     return all_data
 
 # ----------------------------------------------------
