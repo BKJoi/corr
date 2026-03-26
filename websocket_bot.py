@@ -271,31 +271,53 @@ if st.sidebar.button("🚀 1:1 분석 & 주포 자동 스캔"):
         else:
             st.info("오늘 이 종목에서는 뚜렷한 역상관을 보이는 메이저 세력 창구가 발견되지 않았습니다.")
 
+# ----------------------------------------------------
+        # 3. TOP 5 랭킹 발표 및 시각화 (여기로 덮어쓰기!)
         # ----------------------------------------------------
-        # 3. 1등 주포 발표 및 시각화
-        # ----------------------------------------------------
-        if best_broker_name and best_corr <= -0.3:
-            st.success(f"🏆 주포 포착 완료! 오늘 [{selected_broker_name1}] 물량을 가장 악랄하게 털어먹은 창구는 **{best_broker_name}** 입니다.")
-            
-            st.markdown(
-                f"""
-                <div style='padding: 20px; border-radius: 10px; border: 2px solid #0066ff; background-color: #f8f9fa; text-align: center;'>
-                    <h3 style='margin:0; color: #333;'>[{selected_broker_name1}] <span style='color:gray;'>vs</span> <span style='color:#0066ff;'>[{best_broker_name}]</span></h3>
-                    <h1 style='margin: 10px 0; font-size: 50px; color: #0066ff;'>{best_corr:+.2f}</h1>
-                    <p style='margin:0; font-size: 18px; color: #0066ff; font-weight: bold;'>🔥 완벽한 역상관 (진짜 세력)</p>
-                </div>
-                <br>
-                """, unsafe_allow_html=True
-            )
+        # 상관계수가 낮은 순(가장 반대)으로 정렬
+        all_scan_results.sort(key=lambda x: x['corr'])
+        top_5 = all_scan_results[:5] # 상위 5개만 추출
 
-            # 최적 창구의 1분봉 차트 출력
-            fig_best = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.6, 0.4])
-            fig_best.add_trace(go.Scatter(x=best_df.index, y=best_df['Cum_Net_brk1'], mode='lines', name=selected_broker_name1, line=dict(color='#ff4d4d', width=3)), row=1, col=1)
-            fig_best.add_trace(go.Scatter(x=best_df.index, y=best_df['Cum_Net_cand'], mode='lines', name=best_broker_name, line=dict(color='#0066ff', width=3)), row=1, col=1)
-            fig_best.add_trace(go.Bar(x=best_df.index, y=best_df['Net_1m_brk1'], name=selected_broker_name1, marker_color='#ff4d4d', opacity=0.7), row=2, col=1)
-            fig_best.add_trace(go.Bar(x=best_df.index, y=best_df['Net_1m_cand'], name=best_broker_name, marker_color='#0066ff', opacity=0.7), row=2, col=1)
-            fig_best.update_layout(height=600, template='plotly_white', barmode='group', showlegend=False)
-            st.plotly_chart(fig_best, use_container_width=True)
+        # ⭐️ 이제 'best_broker_name' 대신 'top_5'가 있는지 확인합니다.
+        if top_5:
+            st.markdown(f"#### 🏆 실시간 역상관 주포 랭킹 (기준: {selected_broker_name1})")
             
+            # 5칸 대시보드 생성
+            cols = st.columns(5)
+            for rank, (col, res) in enumerate(zip(cols, top_5), 1):
+                with col:
+                    box_color = "#0066ff" if res['corr'] <= -0.5 else "#5e96ff" if res['corr'] <= -0.3 else "#abb8c3"
+                    st.markdown(
+                        f"""
+                        <div style='padding: 10px; border-radius: 8px; border: 2px solid {box_color}; background-color: white; text-align: center; height: 160px;'>
+                            <p style='margin:0; font-size: 14px; font-weight: bold; color: {box_color};'>{rank}위</p>
+                            <p style='margin: 5px 0; font-size: 15px; font-weight: bold; color: #333;'>{res['name']}</p>
+                            <h2 style='margin: 10px 0; color: {box_color};'>{res['corr']:+.2f}</h2>
+                            <p style='margin:0; font-size: 11px; color: gray;'>{'세력 감지' if res['corr'] <= -0.3 else '관망'}</p>
+                        </div>
+                        """, unsafe_allow_html=True
+                    )
+            
+            st.divider()
+
+            # --- [4단계] 1등 주포 상세 차트 ---
+            # 리스트의 첫 번째 녀석(0번)이 1등입니다.
+            best_res = top_5[0]
+            if best_res['corr'] <= -0.3:
+                st.success(f"🥇 최강 주포 포착: [{best_res['name']}]의 누적 순매수와 [{selected_broker_name1}]은 완벽하게 거꾸로 달리고 있습니다.")
+                
+                best_df = best_res['df']
+                best_df['Cum_Net_cand'] = best_df['Net_1m_cand'].cumsum()
+                best_df['Cum_Net_brk1'] = best_df['Net_1m_brk1'].cumsum()
+
+                fig_best = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.6, 0.4])
+                fig_best.add_trace(go.Scatter(x=best_df.index, y=best_df['Cum_Net_brk1'], mode='lines', name=selected_broker_name1, line=dict(color='#ff4d4d', width=3)), row=1, col=1)
+                fig_best.add_trace(go.Scatter(x=best_df.index, y=best_df['Cum_Net_cand'], mode='lines', name=best_res['name'], line=dict(color='#0066ff', width=3)), row=1, col=1)
+                fig_best.add_trace(go.Bar(x=best_df.index, y=best_df['Net_1m_brk1'], name=selected_broker_name1, marker_color='#ff4d4d', opacity=0.7), row=2, col=1)
+                fig_best.add_trace(go.Bar(x=best_df.index, y=best_df['Net_1m_cand'], name=best_res['name'], marker_color='#0066ff', opacity=0.7), row=2, col=1)
+                fig_best.update_layout(height=500, template='plotly_white', barmode='group', showlegend=False)
+                st.plotly_chart(fig_best, use_container_width=True)
+            else:
+                st.info("오늘 이 종목에서는 뚜렷한 역상관을 보이는 메이저 세력 창구가 발견되지 않았습니다.")
         else:
-            st.info("오늘 이 종목에서는 뚜렷한 역상관을 보이는 메이저 세력 창구가 발견되지 않았습니다. (세력 이탈 또는 소형 창구 주도)")
+            st.info("스캔 결과 유효한 상관관계 데이터가 없습니다.")        
