@@ -106,6 +106,19 @@ target_broker_code2 = broker_dict.get(selected_broker_name2, "")
 
 lag_seconds = st.sidebar.slider("⏱️ 창구 시간 보정 (초)", 0, 180, 130)
 
+# --- ⭐️ 원격 작업용 긴급 해결 버튼 추가 ---
+st.sidebar.markdown("---")
+if st.sidebar.button("🧹 오전 데이터 누락 시 (캐시 삭제)"):
+    # session_state에 저장된 모든 수급 쓰레기를 비웁니다.
+    for key in ['pg', 'brk1', 'brk2']:
+        if key in st.session_state.get('data_cache', {}):
+            st.session_state['data_cache'][key] = []
+    # 검색 기록도 지워야 처음부터 다시 긁습니다.
+    if 'last_search_key' in st.session_state:
+        del st.session_state['last_search_key']
+    st.rerun()
+# -----------------------------------------
+
 # ⭐️ 자동 검색할 10대 엘리트 창구 풀 생성
 elite_keywords = ["신한", "모건", "제이피", "골드만", "메릴린치", "삼성", "한국", "미래", "NH", "KB"]
 elite_brokers = {name: code for name, code in broker_dict.items() if any(k in name for k in elite_keywords)}
